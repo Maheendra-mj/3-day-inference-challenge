@@ -1,0 +1,14 @@
+# ~1 minute sanity run: confirms model load, decode loop, telemetry, DB write.
+model:
+  name: Qwen/Qwen2.5-0.5B-Instruct
+  dtype: float16
+device: cuda:0
+results_dir: results
+seed: 0
+ignore_eos: true
+sweep:
+  batch_sizes: [1, 4]
+  prompt_lens: [64]
+  output_lens: [32]
+  warmup_iters: 1
+  repeat: 1

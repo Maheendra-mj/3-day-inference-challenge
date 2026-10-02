@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "infer-lab"
+version = "0.1.0"
+description = "LLM Inference Lab: PyTorch / vLLM / ONNX-TensorRT benchmarking on Kaggle T4x2"
+requires-python = ">=3.10"
+# torch is intentionally NOT listed: use the CUDA build that ships with the Kaggle image
+# (vLLM, when installed via the [vllm] extra, pins its own torch).
+dependencies = [
+    "numpy",
+    "pandas",
+    "pyyaml",
+    "nvidia-ml-py",
+    "transformers>=4.45",
+    "accelerate",
+    "matplotlib",
+    "ninja",
+]
+
+[project.optional-dependencies]
+vllm = ["vllm", "requests", "aiohttp"]
+trt = ["onnx", "onnxruntime-gpu", "tensorrt", "optimum[exporters]"]
+dev = ["pytest"]
+
+[project.scripts]
+infer-lab = "infer_lab.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"infer_lab.kernels" = ["csrc/*.cu"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
