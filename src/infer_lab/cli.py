@@ -2,6 +2,7 @@
 
   infer-lab env                                   # GPU / library report
   infer-lab bench --config configs/smoke.yaml     # offline sweep, PyTorch baseline
+  infer-lab profile --bs 32 --pl 128 512          # GPU-busy vs wall time per decode step
   infer-lab kernels                               # CUDA kernel lab benchmarks
   infer-lab report                                # print results table
 """
@@ -45,6 +46,16 @@ def cmd_bench(args: argparse.Namespace) -> None:
     run_sweep(cfg, args.backend, tag=args.tag)
 
 
+def cmd_profile(args: argparse.Namespace) -> None:
+    from infer_lab.bench.profile import run_profile
+    from infer_lab.config import BenchConfig
+
+    cfg = BenchConfig.from_yaml(args.config)
+    if args.results_dir:
+        cfg.results_dir = args.results_dir
+    run_profile(cfg, args.bs, args.pl, args.ol, args.trace)
+
+
 def cmd_kernels(args: argparse.Namespace) -> None:
     from infer_lab.kernels.bench_kernels import run_all
 
@@ -61,13 +72,16 @@ def cmd_report(args: argparse.Namespace) -> None:
         print("no results yet")
         return
     cols = ["id", "tag", "backend", "batch_size", "prompt_len", "output_len",
-            "output_tokens_per_s", "ttft_p50_ms", "ttft_p99_ms", "tpot_p50_ms", "e2e_p99_ms"]
+            "output_tokens_per_s", "ttft_p50_ms", "ttft_p99_ms", "tpot_p50_ms", "e2e_p99_ms",
+            "torch_peak_mem_mb", "gpu.gpu0.util_mean_pct", "gpu.gpu0.power_mean_w"]
     with pd.option_context("display.width", 200, "display.max_rows", 500):
         print(df[[c for c in cols if c in df.columns]].round(2).to_string(index=False))
 
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    for noisy in ("httpx", "huggingface_hub", "numexpr"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
     p = argparse.ArgumentParser(prog="infer-lab")
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -79,6 +93,15 @@ def main() -> None:
     b.add_argument("--tag")
     b.add_argument("--results-dir")
     b.set_defaults(fn=cmd_bench)
+
+    pr = sub.add_parser("profile", help="GPU-busy vs wall time per decode step (torch.profiler)")
+    pr.add_argument("--config", default="configs/bench.yaml")
+    pr.add_argument("--bs", type=int, nargs="+", default=[32])
+    pr.add_argument("--pl", type=int, nargs="+", default=[128, 512])
+    pr.add_argument("--ol", type=int, default=32)
+    pr.add_argument("--trace", action="store_true", help="also export Chrome/Perfetto traces")
+    pr.add_argument("--results-dir")
+    pr.set_defaults(fn=cmd_profile)
 
     k = sub.add_parser("kernels")
     k.add_argument("--results-dir", default="results")

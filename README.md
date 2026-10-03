@@ -97,8 +97,15 @@ Use separate notebooks for the **vLLM** stack and the **TensorRT** stack. vLLM i
 |---|---|---|
 | 1 h | Repo, harness, `infer-lab env`, tests | `pytest` is green; `env` shows 2× T4 sm_75 |
 | 3 h | `hf_torch` backend with explicit prefill/decode loop, sweep runner, SQLite | `bench --config configs/bench.yaml` fills the DB; `report` prints a table |
-| 1 h | Analyse the baseline | Chart of tok/s vs batch size; note where TTFT grows with prompt length (compute-bound) and where TPOT stays flat (bandwidth-bound) |
-| 3 h | Kernel lab: vector_add (scalar vs vec4), matmul (naive vs tiled) | vec4 reaches about 80% of 320 GB/s; tiled is well ahead of naive; all correctness checks pass |
+| 1 h | Analyse the baseline | Chart of tok/s vs batch size; identify the launch-bound, compute-bound and attention-heavy regimes (see results below) |
+| 3 h | Kernel lab: vector_add (scalar vs vec4), matmul (naive vs tiled) | vector_add near the practical ceiling of about 245 GB/s; tiled faster than naive; all correctness checks pass |
+
+#### Day 1 results (Kaggle T4 ×2, torch 2.10 / cu128, transformers 5.0, Qwen2.5-0.5B fp16)
+- **Eager decode is launch-bound, not bandwidth-bound.** TPOT is about 29 ms from bs=1 to bs=32 (at pl=128). Reading the 0.99 GB of weights takes about 3–4 ms at about 250 GB/s, so the GPU is idle about 85% of each step while Python/HF launches kernels. Throughput therefore scales almost linearly with batch size (34 → 990 tok/s). CUDA graphs (vLLM, Day 2) remove this floor.
+- **Prefill is compute-bound.** TTFT grows linearly with total prompt tokens: 2k → 175 ms, 8k → 725 ms, 16k → 1625 ms, about 0.1 ms/token or about 10 effective TFLOPS fp16. At an equal 2k tokens, 4×512 costs more than 16×128 because attention is quadratic in sequence length.
+- **bs=32 × pl=512 leaves the launch floor.** TPOT doubles to 60 ms and throughput falls to 443 tok/s: per-step attention/KV work now exceeds launch overhead. Confirm with `torch.profiler`.
+- **Static batching shows up in the data.** TTFT p50 ≈ p99 and E2E is identical for every request in a batch, because everyone waits for the whole batch.
+- **Kernels.** vector_add: torch 245 / vec4 238 / scalar 226 GB/s. About 77% of the 320 GB/s spec is the practical ceiling with ECC on. matmul: tiled16 is 1.5–1.7× faster than naive but only 0.6–0.9 TFLOPS vs cuBLAS 3.5–5.9. It is limited by shared-memory traffic (1 output per thread). Next step: register blocking.
 
 ### Day 2: vLLM, KV-Cache Observatory, multi-GPU, continuous batching
 | Block | Work | Done when |

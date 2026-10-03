@@ -61,14 +61,19 @@ def run_sweep(cfg: BenchConfig, backend_name: str, tag: str | None = None) -> li
         row = dict(backend=backend_name, model=cfg.model.name, batch_size=bs,
                    prompt_len=pl, output_len=ol, params=cfg.to_dict(),
                    metrics=metrics, gpu=gpu, tag=tag)
-        db.insert(**row)
+        run_id = db.insert(**row)
+        mon.write_timeseries(Path(cfg.results_dir) / "telemetry" / f"run_{run_id}.csv")
         with jsonl.open("a") as f:
             f.write(json.dumps(row) + "\n")
         rows.append(row)
+        g = gpu.get(f"gpu{_gpu_index(cfg.device)}", {})
         log.info(
-            "bs=%-3d pl=%-5d ol=%-4d  tok/s=%8.1f  ttft_p50=%7.1fms  tpot_p50=%6.2fms",
-            bs, pl, ol, metrics["output_tokens_per_s"],
+            "run %d  bs=%-3d pl=%-5d ol=%-4d  tok/s=%8.1f  ttft_p50=%7.1fms  tpot_p50=%6.2fms"
+            "  util=%3.0f%%  power=%4.1fW  sm_clk=%4.0fMHz",
+            run_id, bs, pl, ol, metrics["output_tokens_per_s"],
             metrics["ttft_p50_ms"], metrics.get("tpot_p50_ms", float("nan")),
+            g.get("util_mean_pct", float("nan")), g.get("power_mean_w", float("nan")),
+            g.get("sm_clock_mean_mhz", float("nan")),
         )
 
     backend.close()

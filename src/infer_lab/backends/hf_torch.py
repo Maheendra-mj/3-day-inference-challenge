@@ -9,12 +9,17 @@ import inspect
 import time
 
 import torch
+import transformers
+from packaging.version import Version
+from torch.profiler import record_function
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from infer_lab.backends.base import Backend
 from infer_lab.bench.metrics import RequestRecord
 
 _DTYPES = {"float16": torch.float16, "float32": torch.float32, "bfloat16": torch.bfloat16}
+# `torch_dtype` was renamed to `dtype` in transformers 4.56 (old name warns in 5.x).
+_DTYPE_KW = "dtype" if Version(transformers.__version__) >= Version("4.56") else "torch_dtype"
 
 
 class HFTorchBackend(Backend):
@@ -81,10 +86,11 @@ class HFTorchBackend(Backend):
         t_submit = time.perf_counter()
 
         # ---- prefill ----
-        out = self.model(
-            input_ids=input_ids, attention_mask=attn, position_ids=position_ids,
-            use_cache=True, **self._last_logits_kw,
-        )
+        with record_function("prefill"):
+            out = self.model(
+                input_ids=input_ids, attention_mask=attn, position_ids=position_ids,
+                use_cache=True, **self._last_logits_kw,
+            )
         past = out.past_key_values
         next_tok = out.logits[:, -1, :].argmax(-1)
         torch.cuda.synchronize(self.device)
@@ -99,10 +105,11 @@ class HFTorchBackend(Backend):
             if finished is not None and bool(finished.all()):
                 break
             attn = torch.cat([attn, attn.new_ones((B, 1))], dim=1)
-            out = self.model(
-                input_ids=next_tok[:, None], attention_mask=attn, position_ids=cur_pos,
-                past_key_values=past, use_cache=True,
-            )
+            with record_function("decode_step"):
+                out = self.model(
+                    input_ids=next_tok[:, None], attention_mask=attn, position_ids=cur_pos,
+                    past_key_values=past, use_cache=True,
+                )
             past = out.past_key_values
             next_tok = out.logits[:, -1, :].argmax(-1)
             cur_pos = cur_pos + 1

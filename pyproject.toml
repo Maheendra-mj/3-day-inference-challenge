@@ -11,6 +11,7 @@ requires-python = ">=3.10"
 # (vLLM, when installed via the [vllm] extra, pins its own torch).
 dependencies = [
     "numpy",
+    "packaging",
     "pandas",
     "pyyaml",
     "nvidia-ml-py",
