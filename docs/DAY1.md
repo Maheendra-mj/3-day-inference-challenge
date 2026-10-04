@@ -2,7 +2,7 @@
 
 This document explains Day 1 from zero: the goal, what was built, every file and
 function, the experiments that were run, what the numbers mean, and every technical
-term used. Read the sections in order the first time; later, use the glossary (§9) as
+term used. Read the sections in order the first time; later, use the glossary (§10) as
 a reference.
 
 ---
@@ -499,17 +499,175 @@ the longest one. **Continuous batching** (Day 2) admits and releases requests ev
 
 ---
 
-## 8. Limitations to remember (honest caveats)
+## 8. Latest results: Kaggle session 2026-10-04
+
+Source: `notebooks/test1.ipynb`, session of 2026-10-04 (fresh VM, latest code including
+the fixed profiler). Model `Qwen/Qwen2.5-0.5B-Instruct`, fp16, `cuda:0`, `ignore_eos=true`,
+greedy, `repeat=3`.
+
+### 8.1 Environment
+
+| Item | Value |
+|---|---|
+| GPUs | 2× Tesla T4, sm_75, 40 SMs, 14.6 GiB usable each |
+| Driver / CUDA | 580.178.04 / CUDA 12.8 (driver supports 13.0) |
+| Software | Python 3.12.13, torch 2.10.0+cu128, transformers 5.0.0, triton 3.6.0 |
+| Topology | `PHB` (GPU↔GPU over PCIe through the host bridge) |
+| P2P 0↔1 | **True** (was False on the 2026-10-02 VM; varies by Kaggle host) |
+| Tests | 23 passed (144 s, includes kernel JIT builds) |
+
+### 8.2 Benchmark sweep: `bench.yaml`, tag `baseline_v2`
+
+TTFT/TPOT/E2E in ms, peak memory in MB (torch allocator), util/power/SM clock = NVML mean
+over the measured repeats.
+
+| Run | bs | pl | ol | Output tok/s | TTFT p50 | TTFT p99 | TPOT p50 | E2E p99 | Peak mem | GPU util | Power | SM clock |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 3 | 1 | 128 | 128 | 32.67 | 33.03 | 38.20 | 30.48 | 3958 | 966 | 38% | 38.6 W | 885 MHz |
+| 4 | 1 | 512 | 128 | 32.95 | 47.73 | 48.98 | 30.35 | 3904 | 1009 | 35% | 46.1 W | 1291 MHz |
+| 5 | 4 | 128 | 128 | 134.78 | 33.52 | 34.45 | 29.69 | 3828 | 984 | 36% | 47.7 W | 1362 MHz |
+| 6 | 4 | 512 | 128 | 126.50 | 199.51 | 200.42 | 30.01 | 4161 | 1155 | 49% | 64.7 W | 1548 MHz |
+| 7 | 16 | 128 | 128 | 511.59 | 146.12 | 146.30 | 30.37 | 4004 | 1059 | 56% | 67.5 W | 1478 MHz |
+| 8 | 16 | 512 | 128 | 381.65 | 906.67 | 918.96 | 35.10 | 5393 | 1739 | 98% | 65.4 W | 948 MHz |
+| 9 | 32 | 128 | 128 | 967.73 | 287.76 | 288.73 | 31.09 | 4255 | 1160 | 87% | 66.3 W | 1183 MHz |
+| 10 | 32 | 512 | 128 | 434.87 | 1720.76 | 1733.73 | **60.53** | 9437 | 2517 | 98% | 66.1 W | 946 MHz |
+
+Smoke run (`smoke.yaml`) in the same session:
+
+| Run | bs | pl | ol | Output tok/s | TTFT p50 | TPOT p50 | E2E p99 | Peak mem | GPU util | Power | SM clock |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 1 | 64 | 32 | 32.70 | 33.52 | 30.46 | 978 | 962 | 40% | 35.7 W | 832 MHz |
+| 2 | 4 | 64 | 32 | 135.70 | 32.98 | 29.34 | 942 | 974 | 41% | 35.7 W | 952 MHz |
+
+### 8.3 Decode profile: `infer-lab profile --bs 1 32 --pl 128 512 --ol 32` (fixed profiler)
+
+Wall = un-profiled median; GPU busy = union of kernel intervals; idle = 1 − busy/wall.
+"CPU stall" = CPU time blocked on a full GPU launch queue (`Command Buffer Full`).
+
+| bs | pl | Prefill wall | Prefill GPU busy | Decode wall/step | Decode GPU busy/step | GPU idle | Kernels/step | Avg kernel | CPU stall | Regime |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 128 | 31.2 ms | 15.8 ms | 28.59 ms | 10.28 ms | **64%** | 1421 | 7.2 µs | 0 ms | launch-bound |
+| 1 | 512 | 52.5 ms | 43.9 ms | 36.79 ms | 9.21 ms | **75%** | 1421 | 6.5 µs | 0 ms | launch-bound |
+| 32 | 128 | 222.3 ms | 235.1 ms | 38.31 ms | 20.78 ms | **46%** | 1421 | 14.6 µs | 12 ms | mixed (CPU ≈ GPU) |
+| 32 | 512 | 1439.9 ms | 1442.9 ms | 55.46 ms | 53.50 ms | **4%** | 1421 | 37.7 µs | 401 ms | GPU-bound |
+
+Repeat of the bs=32 points earlier in the same session (`--bs 32 --pl 128 512 --ol 32 --trace`):
+
+| bs | pl | Prefill wall | Prefill GPU busy | Decode wall/step | Decode GPU busy/step | GPU idle | Kernels/step | Avg kernel | CPU stall |
+|---|---|---|---|---|---|---|---|---|---|
+| 32 | 128 | 241.3 ms | 231.1 ms | 29.64 ms | 20.97 ms | 29% | 1421 | 14.8 µs | 18 ms |
+| 32 | 512 | 1456.7 ms | 1466.5 ms | 55.43 ms | 53.34 ms | 4% | 1421 | 37.5 µs | 412 ms |
+
+GPU busy/step is stable between repeats (20.97 vs 20.78 ms); wall/step at bs=32 × 128 is
+not (29.6 vs 38.3 ms). When the CPU is (part of) the bottleneck, timings pick up host jitter.
+
+### 8.4 Top GPU ops: bs=32, pl=512, ol=32 (full profiled run incl. prefill)
+
+| Op / kernel | Self CUDA | % of GPU time | Calls | Avg | What it is |
+|---|---|---|---|---|---|
+| `aten::copy_` | 710.5 ms | 22.8% | 8803 | 83.6 µs | KV `repeat_kv` expansion + fp16→fp32 casts |
+| `aten::bmm` | 621.2 ms | 19.9% | 1568 | 419.8 µs | Attention matmuls (math SDPA) + RoPE |
+| `aten::mm` | 588.2 ms | 18.9% | 3104 | 227.9 µs | Linear layers (q/k/v/o, MLP, lm_head) |
+| `aten::mul` | 543.1 ms | 17.4% | 8576 | 67.9 µs | Scaling, RMSNorm, RoPE, SwiGLU |
+| `elementwise_kernel<128,2>` | 462.3 ms | 14.8% | 1560 | 296.3 µs | Large strided copy (expanded KV) |
+| `vectorized_elementwise_kernel<4> (unary)` | 408.9 ms | 13.1% | 1600 | 255.6 µs | Large dtype cast (KV → fp32) |
+| `Command Buffer Full` (CPU) | 411.7 ms CPU | n/a | 365 | 1.13 ms | CPU waiting on a full GPU queue |
+| `turing_fp16_s1688gemm_256x128` | 251.3 ms | 8.1% | 48 | 5.24 ms | Prefill linear layers (fp16 tensor cores) |
+| `gemv2T_kernel_val<…float…>` | 199.9 ms | 6.4% | 744 | 268.7 µs | Decode attention in **fp32** (31 steps × 24 layers) |
+| `gemvx::kernel<…>` | 188.8 ms | 6.1% | 744 | 253.7 µs | Decode attention in fp32 (second matmul) |
+| `unrolled_elementwise_kernel (direct_copy)` | 139.5 ms | 4.5% | 3904 | 35.7 µs | Smaller copies |
+| `turing_fp16_s1688gemm_128x64_sliced1x2` | 133.4 ms | 4.3% | 1520 | 87.7 µs | Decode linear layers (≈4.3 ms/step: the weight read) |
+| `volta_sgemm_128x64_tn` | 127.9 ms | 4.1% | 24 | 5.33 ms | Prefill attention in **fp32** (one per layer) |
+
+Totals: Self CPU 3.204 s, Self CUDA 3.120 s. (The `decode_step` / `prefill` rows are our
+labels and contain the kernels above, so they are not listed.)
+
+### 8.5 Kernel lab: `infer-lab kernels`
+
+| Kernel | Variant | Size | Time | Throughput | % of T4 spec |
+|---|---|---|---|---|---|
+| vector_add | torch | 67,108,864 | 3.307 ms | 243.5 GB/s | 76.1% |
+| vector_add | scalar | 67,108,864 | 3.594 ms | 224.0 GB/s | 70.0% |
+| vector_add | vec4 | 67,108,864 | 3.412 ms | 236.0 GB/s | 73.8% |
+| matmul | cuBLAS | 512² | 0.069 ms | 3.865 TFLOPS | 47.7% |
+| matmul | naive | 512² | 0.453 ms | 0.593 TFLOPS | 7.3% |
+| matmul | tiled16 | 512² | 0.290 ms | 0.924 TFLOPS | 11.4% |
+| matmul | cuBLAS | 1024² | 0.365 ms | 5.891 TFLOPS | 72.7% |
+| matmul | naive | 1024² | 4.730 ms | 0.454 TFLOPS | 5.6% |
+| matmul | tiled16 | 1024² | 2.787 ms | 0.770 TFLOPS | 9.5% |
+| matmul | cuBLAS | 2048² | 4.650 ms | 3.695 TFLOPS | 45.6% |
+| matmul | naive | 2048² | 40.780 ms | 0.421 TFLOPS | 5.2% |
+| matmul | tiled16 | 2048² | 26.832 ms | 0.640 TFLOPS | 7.9% |
+
+Tiled vs naive speed-up: 1.56× (512²), 1.70× (1024²), 1.52× (2048²).
+
+### 8.6 Same sweep across three Kaggle VMs
+
+| bs | pl | TPOT p50 Oct 2 | TPOT p50 Oct 3 | TPOT p50 Oct 4 | tok/s Oct 2 | tok/s Oct 3 | tok/s Oct 4 |
+|---|---|---|---|---|---|---|---|
+| 1 | 128 | 29.44 | 34.46 | 30.48 | 33.76 | 28.9 | 32.67 |
+| 1 | 512 | 29.59 | 31.84 | 30.35 | 33.79 | 30.7 | 32.95 |
+| 4 | 128 | 29.09 | 33.34 | 29.69 | 137.84 | 119.6 | 134.78 |
+| 4 | 512 | 28.96 | 32.66 | 30.01 | 132.42 | 118.0 | 126.50 |
+| 16 | 128 | 29.12 | 33.40 | 30.37 | 536.39 | 467.7 | 511.59 |
+| 16 | 512 | 33.92 | 34.25 | 35.10 | 407.05 | 407.0 | 381.65 |
+| 32 | 128 | 30.57 | 33.83 | 31.09 | 990.41 | 899.4 | 967.73 |
+| 32 | 512 | **59.92** | **59.66** | **60.53** | 443.19 | 452.3 | 434.87 |
+
+| bs | pl | TTFT p50 Oct 2 | TTFT p50 Oct 3 | TTFT p50 Oct 4 | SM clock Oct 3 | SM clock Oct 4 |
+|---|---|---|---|---|---|---|
+| 16 | 512 | 725.28 | 690.1 | 906.67 | 1270 MHz | 948 MHz |
+| 32 | 512 | 1624.91 | 1487.6 | 1720.76 | 1092 MHz | 946 MHz |
+
+### 8.7 Predictions vs measured
+
+| Prediction (made before the run) | Measured | Verdict |
+|---|---|---|
+| bs=1 decode ~85–90% GPU idle | 64–75% idle | Direction right, magnitude too high: GPU busy is ~10 ms/step, not ~4 ms, because 1421 tiny kernels each cost ~7 µs even with almost no work |
+| bs=32 × 128 ~40% idle | 29–46% idle, 12–18 ms CPU stall | ✅ mixed regime |
+| bs=32 × 512 ~0% idle, large CPU stall | 4% idle, 401–412 ms stall | ✅ GPU-bound |
+| Kernel count independent of shape | 1421 at every point | ✅ |
+| Profiler busy ≤ wall after fix | Holds at all points (prefill busy within ±1–2% of wall at bs=32) | ✅ |
+
+### 8.8 What these numbers say
+
+1. **Two regimes, one formula.** Decode step ≈ max(CPU launch time, GPU work). CPU launch
+   time ≈ 28–31 ms (1421 kernels); GPU work grows with batch × context: 10 ms (bs=1) →
+   21 ms (bs=32 × 128) → 53 ms (bs=32 × 512).
+2. **The cross-VM table is the cleanest proof.** Launch-bound points move with the host
+   CPU (29 → 33 → 30 ms TPOT), while the GPU-bound point (bs=32 × 512) stays at ~60 ms on
+   all three VMs.
+3. **Prefill is compute-bound and throttles.** At bs=32 prefill GPU busy ≈ wall. The same
+   prefill was 16% slower on Oct 4 than Oct 3 with a 13% lower SM clock (946 vs 1092 MHz):
+   the T4 sits at its 70 W cap and down-clocks.
+4. **Where bs=32 × 512 time goes:** KV copies/casts (~23% + kernels) and fp32 attention
+   matmuls dominate; the "useful" fp16 weight GEMMs are ~4.3 ms/step. That gap is the
+   target for vLLM (PagedAttention, CUDA graphs) on Day 2.
+5. **Kernel lab is reproducible.** Within ±3% of the previous sessions.
+
+### 8.9 Notes on the notebook
+
+- Cells 5 and 7 still show **older outputs** (Oct 3 / Oct 2); in the Oct 4 session only
+  `baseline_v2` was benchmarked, which is why its runs are numbered 3–10 in the report.
+- Cell 14 reads `results/telemetry/1.csv`; the runner writes `results/telemetry/run_<id>.csv`
+  (e.g. `run_10.csv` for bs=32 × 512).
+- The `torch_dtype is deprecated` warning is still printed: `hf_torch.py` line 48 still passes
+  `torch_dtype=` (warning only; results unaffected).
+
+---
+
+## 9. Limitations to remember (honest caveats)
 
 - One model (0.5B), one GPU, greedy decoding, `ignore_eos=True`, synthetic prompts.
 - `repeat=3` → p99 with few samples is close to the max; fine for static batches
   (identical timings), but Day 2's load tests need hundreds of requests.
 - NVML utilisation ≠ compute efficiency (see §5.9).
-- Finding 4's cause is not yet profiled.
+- Wall-clock per-step numbers in CPU-bound regimes vary between runs and VMs (§8.3, §8.6);
+  compare GPU-busy times, or results from the same session.
 
 ---
 
-## 9. Glossary
+## 10. Glossary
 
 **Model & generation**
 - **LLM inference**: running a trained model to produce output (no training/gradients).
