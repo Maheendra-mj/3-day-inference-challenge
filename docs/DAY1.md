@@ -445,6 +445,27 @@ lower idle, and the top-ops file (`results/profile/top_ops_*.txt`) shows attenti
 cache-concatenation kernels growing. Open `trace_*.json` in https://ui.perfetto.dev to see
 the gaps between kernels with your own eyes.
 
+**Result (Kaggle, 2026-10-03; profile of bs=32, pl=512, ol=32):**
+
+| Evidence | Value | Meaning |
+|---|---|---|
+| Kernels per decode step | **1422**, same for pl=128 and pl=512 | ≈59 tiny kernels per layer × 24 layers. At ~23 µs of CPU dispatch each, that is ≈33 ms: the launch floor |
+| bs=1 NVML | util 35–39%, power 33–37 W, SM clock 700–1100 MHz | GPU mostly idle, even down-clocking, so launch-bound |
+| TPOT on two different Kaggle VMs | 29 ms (Oct 2) vs 33 ms (Oct 3), same GPU model | The floor moves with the **host CPU**, which only makes sense if decode is CPU-bound |
+| bs=32 pl=512 NVML | util 98%, 68 W of a 70 W cap, SM clock ~1100 MHz (boost 1590) | GPU saturated and power-throttled |
+| `Command Buffer Full` | 362 events, 418 ms CPU | CPU blocked because the GPU's launch queue was full, so the GPU is now the bottleneck |
+| `gemv… float` kernels | 744 calls = 31 steps × 24 layers | Attention runs in **fp32** (math SDPA fallback; torch upcasts fp16 there) |
+| Large copy kernels (elementwise / vectorized unary) | ~870 ms ≈ 28 ms per step | `repeat_kv` expands 2 KV heads → 14 (×7) and converts them to fp32, **every step, every layer** |
+| fp16 GEMM for linear layers | ~4.3 ms per step | Reading 0.99 GB of weights at ~230 GB/s, the only "ideal" part of the step |
+
+**Explanation.** A decode step costs `max(CPU launch floor ≈ 33 ms, GPU work)`.
+GPU work ≈ (weights ≈ 4 ms) + (attention traffic ∝ batch × context). Attention here moves
+the KV cache roughly **40× more bytes than necessary** (7× GQA expansion, 2× fp32 upcast,
+copied again every layer, every step). At bs=16 × 512 the GPU work reaches the floor (TPOT
+34 ms); at bs=32 × 512 (~18k cached tokens) it is ≈56 ms, so TPOT doubles and throughput
+drops. vLLM's PagedAttention kernel reads the fp16 KV cache once with native GQA, and
+CUDA graphs remove the launch floor; Day 2 measures both effects.
+
 The NVML monitor alone can't settle this: its "utilisation" only says *some* kernel
 was running in each sample window, so launch-bound decode can still read ~90–100%. The
 per-run timeline in `results/telemetry/run_<id>.csv` (power, SM clock) shows how hard

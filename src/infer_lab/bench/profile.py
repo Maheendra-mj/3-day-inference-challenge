@@ -25,19 +25,37 @@ from infer_lab.config import BenchConfig
 log = logging.getLogger(__name__)
 
 
-def _self_device_us(evt) -> float:
-    v = getattr(evt, "self_device_time_total", None)  # torch >= 2.4
-    return v if v is not None else evt.self_cuda_time_total
+# Device-side events that are NOT GPU work: record_function ranges are mirrored onto the
+# GPU timeline (they *contain* kernels), and "Command Buffer Full" is the CPU stalling
+# because the GPU's launch queue is full. Counting them double-counts busy time.
+_NOT_KERNELS = {"prefill", "decode_step", "Command Buffer Full"}
 
 
 def _gpu_work(prof) -> tuple[float, int]:
-    """(total GPU-busy ms, number of GPU kernels + memcpys) in a profiled region."""
-    busy_us, n = 0.0, 0
-    for evt in prof.key_averages():
-        if evt.device_type == DeviceType.CUDA:
-            busy_us += _self_device_us(evt)
-            n += evt.count
-    return busy_us / 1000.0, n
+    """(GPU-busy ms, number of kernels/memcpys/memsets) in a profiled region.
+
+    Busy = length of the union of kernel intervals, so overlapping kernels are never
+    counted twice and the result can never exceed wall time.
+    """
+    intervals = [
+        (e.time_range.start, e.time_range.end)
+        for e in prof.events()
+        if e.device_type == DeviceType.CUDA
+        and not getattr(e, "is_user_annotation", False)
+        and e.name not in _NOT_KERNELS
+    ]
+    intervals.sort()
+    busy_us, cur_start, cur_end = 0.0, None, None
+    for s, e in intervals:
+        if cur_end is None or s > cur_end:
+            if cur_end is not None:
+                busy_us += cur_end - cur_start
+            cur_start, cur_end = s, e
+        else:
+            cur_end = max(cur_end, e)
+    if cur_end is not None:
+        busy_us += cur_end - cur_start
+    return busy_us / 1000.0, len(intervals)
 
 
 def _top_ops_table(prof, rows: int = 15) -> str:
@@ -74,6 +92,9 @@ def profile_point(backend, tok, bs: int, pl: int, ol: int, seed: int,
 
     p_prefill = _profiled(backend, prompts, 1)
     p_full = _profiled(backend, prompts, ol)
+    cpu_stall_ms = sum(
+        e.cpu_time_total for e in p_full.key_averages() if e.key == "Command Buffer Full"
+    ) / 1000.0
     busy_prefill, n_prefill = _gpu_work(p_prefill)
     busy_full, n_full = _gpu_work(p_full)
     busy_step = (busy_full - busy_prefill) / (ol - 1)
@@ -95,6 +116,8 @@ def profile_point(backend, tok, bs: int, pl: int, ol: int, seed: int,
         "decode_gpu_idle_pct": idle_pct,
         "kernels_per_decode_step": kernels_step,
         "avg_kernel_us": 1000.0 * busy_step / kernels_step if kernels_step else float("nan"),
+        # CPU time blocked on a full GPU launch queue: > 0 means the GPU is the bottleneck.
+        "cpu_stall_on_full_queue_ms": cpu_stall_ms,
         "verdict": "launch-bound (GPU waits on CPU)" if idle_pct > 50 else "GPU-bound",
     }
 
@@ -124,7 +147,8 @@ def run_profile(cfg: BenchConfig, batch_sizes: list[int], prompt_lens: list[int]
               f"{r['prefill_wall_ms']:>10.1f}ms {r['prefill_gpu_busy_ms']:>7.1f}ms | "
               f"{r['decode_wall_ms_per_step']:>14.2f}ms {r['decode_gpu_busy_ms_per_step']:>11.2f}ms "
               f"{r['decode_gpu_idle_pct']:>7.0f}% {r['kernels_per_decode_step']:>12.0f} "
-              f"{r['avg_kernel_us']:>8.1f}us | {r['verdict']}")
+              f"{r['avg_kernel_us']:>8.1f}us | {r['verdict']}"
+              f"  (CPU stalled on full GPU queue: {r['cpu_stall_on_full_queue_ms']:.0f} ms)")
     print(f"\nTop GPU ops per point: {out_dir}/top_ops_*.txt"
           + (f"   Traces (open in https://ui.perfetto.dev): {out_dir}/trace_*.json" if trace else ""))
     return results
