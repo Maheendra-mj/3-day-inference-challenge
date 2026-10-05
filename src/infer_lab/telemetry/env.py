@@ -32,7 +32,7 @@ def _gpus() -> dict:
         return {}
     try:
         pynvml.nvmlInit()
-    except pynvml.NVMLError:
+    except Exception:
         return {}
     try:
         handles = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in range(pynvml.nvmlDeviceGetCount())]
@@ -48,10 +48,11 @@ def _gpus() -> dict:
         out = {"driver": pynvml.nvmlSystemGetDriverVersion(), "gpus": gpus}
         if len(handles) > 1:
             try:
+                # int(): newer nvidia-ml-py exposes the constant as an enum ctypes can't pass
                 status = pynvml.nvmlDeviceGetP2PStatus(
-                    handles[0], handles[1], pynvml.NVML_P2P_CAPS_INDEX_READ)
-                out["p2p_0_1"] = status == pynvml.NVML_P2P_STATUS_OK
-            except pynvml.NVMLError:
+                    handles[0], handles[1], int(pynvml.NVML_P2P_CAPS_INDEX_READ))
+                out["p2p_0_1"] = int(status) == int(pynvml.NVML_P2P_STATUS_OK)
+            except Exception:  # fingerprinting must never break a benchmark run
                 out["p2p_0_1"] = None
         return out
     finally:
@@ -65,10 +66,14 @@ def env_info() -> dict:
             libs[mod] = importlib.import_module(mod).__version__
         except ImportError:
             libs[mod] = None
+    try:
+        gpus = _gpus()
+    except Exception as e:  # never let fingerprinting break a run
+        gpus = {"gpu_info_error": repr(e)}
     return {
         "python": platform.python_version(),
         "cpu": _cpu_model(),
         "cpu_count": os.cpu_count(),
         "libs": libs,
-        **_gpus(),
+        **gpus,
     }
