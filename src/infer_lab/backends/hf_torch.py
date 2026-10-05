@@ -45,7 +45,7 @@ class HFTorchBackend(Backend):
         self.model = (
             AutoModelForCausalLM.from_pretrained(
                 self.model_name,
-                torch_dtype=self.dtype,
+                **{_DTYPE_KW: self.dtype},
                 attn_implementation=self.attn_implementation,
             )
             .to(self.device)

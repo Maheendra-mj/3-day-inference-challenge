@@ -30,6 +30,7 @@ class BenchConfig:
     results_dir: str = "results"
     seed: int = 0
     ignore_eos: bool = True
+    backend_args: dict = field(default_factory=dict)  # passed to the backend constructor
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "BenchConfig":

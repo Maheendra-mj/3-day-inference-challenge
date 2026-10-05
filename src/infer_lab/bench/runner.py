@@ -12,6 +12,7 @@ from infer_lab.bench.metrics import summarize
 from infer_lab.bench.workload import make_prompt_ids
 from infer_lab.config import BenchConfig
 from infer_lab.storage.results_db import ResultsDB
+from infer_lab.telemetry.env import env_info
 from infer_lab.telemetry.gpu_monitor import GPUMonitor
 
 log = logging.getLogger(__name__)
@@ -23,9 +24,11 @@ def _gpu_index(device: str) -> int:
 
 def run_sweep(cfg: BenchConfig, backend_name: str, tag: str | None = None) -> list[dict]:
     backend = create_backend(
-        backend_name, model_name=cfg.model.name, dtype=cfg.model.dtype, device=cfg.device
+        backend_name, model_name=cfg.model.name, dtype=cfg.model.dtype, device=cfg.device,
+        **cfg.backend_args,
     )
-    log.info("loading %s on %s", cfg.model.name, backend_name)
+    params = {**cfg.to_dict(), "env": env_info()}
+    log.info("loading %s on %s %s", cfg.model.name, backend_name, cfg.backend_args or "")
     backend.load()
     tok = backend.tokenizer()
 
@@ -41,7 +44,7 @@ def run_sweep(cfg: BenchConfig, backend_name: str, tag: str | None = None) -> li
                 backend.generate(prompts, ol, cfg.ignore_eos)
 
             records, wall, extras = [], 0.0, []
-            with GPUMonitor([_gpu_index(cfg.device)]) as mon:
+            with GPUMonitor() as mon:  # all GPUs: tensor-parallel runs use both
                 for _ in range(s.repeat):
                     t0 = time.perf_counter()
                     records += backend.generate(prompts, ol, cfg.ignore_eos)
@@ -59,7 +62,7 @@ def run_sweep(cfg: BenchConfig, backend_name: str, tag: str | None = None) -> li
             metrics.update({k: max(e[k] for e in extras) for k in extras[0]})
         gpu = mon.summary()
         row = dict(backend=backend_name, model=cfg.model.name, batch_size=bs,
-                   prompt_len=pl, output_len=ol, params=cfg.to_dict(),
+                   prompt_len=pl, output_len=ol, params=params,
                    metrics=metrics, gpu=gpu, tag=tag)
         run_id = db.insert(**row)
         mon.write_timeseries(Path(cfg.results_dir) / "telemetry" / f"run_{run_id}.csv")

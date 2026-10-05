@@ -1,0 +1,20 @@
+# vLLM with CUDA graphs OFF. Compared with vllm_offline.yaml this isolates how much of
+# vLLM's speed-up is the removed CPU launch floor vs PagedAttention / better kernels.
+#   /tmp/vllm-env/bin/infer-lab bench --backend vllm_offline --config configs/vllm_offline_eager.yaml --tag vllm_eager
+model:
+  name: Qwen/Qwen2.5-0.5B-Instruct
+  dtype: float16
+device: cuda:0
+results_dir: results
+seed: 0
+ignore_eos: true
+backend_args:
+  gpu_memory_utilization: 0.85
+  max_model_len: 2048
+  enforce_eager: true       # CUDA graphs OFF
+sweep:
+  batch_sizes: [1, 4, 16, 32]
+  prompt_lens: [128, 512]
+  output_lens: [128]
+  warmup_iters: 1
+  repeat: 3

@@ -23,6 +23,11 @@ def cmd_env(_: argparse.Namespace) -> None:
             print(f"{mod:<11} {importlib.import_module(mod).__version__}")
         except ImportError:
             print(f"{mod:<11} -")
+    from infer_lab.telemetry.env import env_info
+    info = env_info()
+    print(f"cpu         {info['cpu']} ({info['cpu_count']} vCPU)")
+    print(f"driver      {info.get('driver', '-')}")
+
     import torch
     if not torch.cuda.is_available():
         print("CUDA        not available")
