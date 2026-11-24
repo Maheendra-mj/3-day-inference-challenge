@@ -14,7 +14,7 @@ SPEC="vllm${1:+==$1}"
 export UV_CACHE_DIR=/tmp/uv-cache
 
 pip install -q uv
-uv venv -q --python "$(command -v python3)" "$VENV"
+uv venv -notebooks/vllm.ipynbq --clear --python "$(command -v python3)" "$VENV"  # --clear: no y/n prompt on re-run
 # One resolve for everything, so vLLM's torch/transformers pins win consistently.
 uv pip install --python "$VENV/bin/python" "$SPEC" -e ".[dev]" requests aiohttp
 
